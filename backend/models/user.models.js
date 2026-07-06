@@ -1,37 +1,41 @@
 const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
 
 const UserSchema = new mongoose.Schema({
   email: {
     type: String,
     required: true,
     unique: true,
-    trim: true,
-    lowercase: true
+    lowercase: true,
+    trim: true
   },
   password: {
     type: String,
-    required: true
+    required: true,
+    minlength: 6
   },
   name: {
     type: String,
-    required: true
+    required: true,
+    trim: true
   },
   role: {
     type: String,
     enum: ['employee', 'admin'],
     default: 'employee'
   },
-  leaveBalance: {
-    type: Number,
-    default: 15
+  employeeId: {
+    type: String,
+    unique: true,
+    default: () => 'EMP' + Math.floor(1000 + Math.random() * 9000)
   },
   department: {
     type: String,
     default: 'General'
   },
-  employeeId: {
-    type: String,
-    unique: true
+  leaveBalance: {
+    type: Number,
+    default: 15
   },
   createdAt: {
     type: Date,
@@ -39,13 +43,21 @@ const UserSchema = new mongoose.Schema({
   }
 });
 
-// Generate employee ID before saving
-UserSchema.pre('save', async function(next) {
-  if (!this.employeeId) {
-    const count = await mongoose.model('User').countDocuments();
-    this.employeeId = `EMP${String(count + 1).padStart(4, '0')}`;
+// Hash password before saving
+UserSchema.pre('save', async function (next) {
+  if (!this.isModified('password')) return next();
+  try {
+    const salt = await bcrypt.genSalt(10);
+    this.password = await bcrypt.hash(this.password, salt);
+    next();
+  } catch (err) {
+    next(err);
   }
-  next();
 });
+
+// Compare password method
+UserSchema.methods.comparePassword = async function (candidatePassword) {
+  return bcrypt.compare(candidatePassword, this.password);
+};
 
 module.exports = mongoose.model('User', UserSchema);

@@ -43,13 +43,11 @@ const LeaveRequestSchema = new mongoose.Schema({
   }
 });
 
-// Update timestamps on save
-LeaveRequestSchema.pre('save', function(next) {
+LeaveRequestSchema.pre('save', function (next) {
   this.updatedAt = Date.now();
   next();
 });
 
-// Add index for better query performance
 LeaveRequestSchema.index({ employeeId: 1, status: 1 });
 LeaveRequestSchema.index({ startDate: 1, endDate: 1 });
 

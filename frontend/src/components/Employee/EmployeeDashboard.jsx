@@ -154,7 +154,7 @@ const EmployeeDashboard = () => {
               color: '#ffffff',
               textShadow: '0 2px 20px rgba(0,0,0,0.1)',
             }}>
-              Welcome, {user?.name || 'Employee'}!
+             
             </Typography>
             <Box sx={{ display: 'flex', gap: 2, mt: 0.5 }}>
               <Typography variant="body2" sx={{ color: 'rgba(255,255,255,0.5)' }}>

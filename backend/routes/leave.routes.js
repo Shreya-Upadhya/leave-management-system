@@ -12,18 +12,19 @@ router.post('/apply', auth, async (req, res) => {
 
     console.log('📝 Applying for leave:', { employeeId, startDate, endDate, reason });
 
-    // Validate dates exist
     if (!startDate || !endDate) {
       return res.status(400).json({ error: 'Start date and end date are required' });
     }
 
-    // Validate dates
+    if (!reason || !reason.trim()) {
+      return res.status(400).json({ error: 'Reason is required' });
+    }
+
     const start = new Date(startDate);
     const end = new Date(endDate);
-    
-    // Check if dates are valid
+
     if (isNaN(start.getTime()) || isNaN(end.getTime())) {
-      return res.status(400).json({ error: 'Invalid date format' });
+      return res.status(400).json({ error: 'Invalid date format. Please use YYYY-MM-DD format.' });
     }
 
     if (start > end) {
@@ -32,40 +33,42 @@ router.post('/apply', auth, async (req, res) => {
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    
+
     if (start < today) {
       return res.status(400).json({ error: 'Cannot apply for past dates' });
     }
 
-    // Calculate working days (excluding weekends)
     const days = calculateWorkingDays(start, end);
-    
+
     if (days <= 0) {
-      return res.status(400).json({ error: 'Invalid leave duration' });
+      return res.status(400).json({ error: 'Invalid leave duration. Must be at least 1 working day.' });
     }
-    
-    // Check balance
+
     const user = await User.findById(employeeId);
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
 
     if (user.leaveBalance < days) {
-      return res.status(400).json({ 
-        error: `Insufficient leave balance. Available: ${user.leaveBalance}, Requested: ${days}` 
+      return res.status(400).json({
+        error: `Insufficient leave balance. Available: ${user.leaveBalance}, Requested: ${days}`
       });
     }
 
-    // Check for overlapping requests - FIXED
+    // Check for overlapping requests
     const overlapping = await LeaveRequest.findOne({
       employeeId,
       status: { $in: ['pending', 'approved'] },
-      startDate: { $lte: end },
-      endDate: { $gte: start }
+      $or: [
+        { startDate: { $lte: end }, endDate: { $gte: start } },
+        { startDate: { $gte: start, $lte: end } },
+        { endDate: { $gte: start, $lte: end } }
+      ]
     });
 
     if (overlapping) {
-      return res.status(400).json({ 
+      console.log('⚠️ Overlapping leave found:', overlapping._id);
+      return res.status(400).json({
         error: 'You already have a pending/approved leave for these dates',
         overlappingRequest: {
           startDate: overlapping.startDate,
@@ -75,23 +78,31 @@ router.post('/apply', auth, async (req, res) => {
       });
     }
 
-    // Create leave request
+    // Create and save leave request
     const leaveRequest = new LeaveRequest({
       employeeId,
       startDate: start,
       endDate: end,
-      reason,
+      reason: reason.trim(),
       daysRequested: days,
       status: 'pending'
     });
 
-    await leaveRequest.save();
-    console.log('✅ Leave request saved:', leaveRequest._id);
-    
-    // Populate employee details
-    await leaveRequest.populate('employeeId', 'name email employeeId');
+    const savedRequest = await leaveRequest.save();
+    console.log('✅ Leave request saved:', savedRequest._id);
 
-    res.status(201).json(leaveRequest);
+    // Deduct from balance
+    user.leaveBalance -= days;
+    await user.save();
+
+    // Populate employee details
+    await savedRequest.populate('employeeId', 'name email employeeId department');
+
+    res.status(201).json({
+      message: 'Leave application submitted successfully',
+      leave: savedRequest,
+      remainingBalance: user.leaveBalance
+    });
   } catch (error) {
     console.error('❌ Error applying for leave:', error);
     res.status(500).json({ error: error.message });
@@ -103,6 +114,7 @@ router.get('/my-leaves', auth, async (req, res) => {
   try {
     const leaves = await LeaveRequest.find({ employeeId: req.user.id })
       .sort({ createdAt: -1 });
+    console.log(`📋 Found ${leaves.length} leave requests for user ${req.user.id}`);
     res.json(leaves);
   } catch (error) {
     console.error('❌ Error fetching leaves:', error);
@@ -113,24 +125,56 @@ router.get('/my-leaves', auth, async (req, res) => {
 // Get leave balance
 router.get('/balance', auth, async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select('leaveBalance');
-    res.json({ balance: user?.leaveBalance || 0 });
+    const user = await User.findById(req.user.id).select('leaveBalance name employeeId');
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.json({
+      balance: user.leaveBalance,
+      name: user.name,
+      employeeId: user.employeeId
+    });
   } catch (error) {
     console.error('❌ Error fetching balance:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Helper function to calculate working days
+// Cancel pending leave
+router.delete('/cancel/:id', auth, async (req, res) => {
+  try {
+    const leave = await LeaveRequest.findOne({
+      _id: req.params.id,
+      employeeId: req.user.id,
+      status: 'pending'
+    });
+
+    if (!leave) {
+      return res.status(404).json({ error: 'Pending leave request not found or already processed' });
+    }
+
+    const user = await User.findById(req.user.id);
+    user.leaveBalance += leave.daysRequested;
+    await user.save();
+
+    await LeaveRequest.findByIdAndDelete(req.params.id);
+
+    res.json({ message: 'Leave request cancelled', balance: user.leaveBalance });
+  } catch (error) {
+    console.error('❌ Error cancelling leave:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Helper: calculate working days (excludes weekends)
 function calculateWorkingDays(startDate, endDate) {
   let count = 0;
   const current = new Date(startDate);
   const end = new Date(endDate);
-  
-  // Ensure we're counting full days
+
   current.setHours(0, 0, 0, 0);
   end.setHours(0, 0, 0, 0);
-  
+
   while (current <= end) {
     const dayOfWeek = current.getDay();
     if (dayOfWeek !== 0 && dayOfWeek !== 6) {

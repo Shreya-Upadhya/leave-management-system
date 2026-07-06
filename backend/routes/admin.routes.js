@@ -4,80 +4,81 @@ const LeaveRequest = require('../models/leave.models');
 const User = require('../models/user.models');
 const { auth, adminAuth } = require('../middleware/auth');
 
-// Get all leave requests (Admin only)
-router.get('/requests', auth, adminAuth, async (req, res) => {
+// Get all leave requests (admin only)
+router.get('/all-leaves', auth, adminAuth, async (req, res) => {
   try {
-    const { status } = req.query;
-    
-    const filter = {};
-    if (status && status !== 'all') filter.status = status;
-
-    const requests = await LeaveRequest.find(filter)
+    const leaves = await LeaveRequest.find()
       .populate('employeeId', 'name email employeeId department')
       .sort({ createdAt: -1 });
-    
-    console.log(`📋 Found ${requests.length} leave requests`);
-    res.json(requests);
+    console.log(`📋 Admin fetched ${leaves.length} leave requests`);
+    res.json(leaves);
   } catch (error) {
-    console.error('❌ Error fetching requests:', error);
+    console.error('❌ Error fetching all leaves:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Approve/Reject leave request (Admin only)
-router.put('/requests/:id', auth, adminAuth, async (req, res) => {
+// Get pending leave requests (admin only)
+router.get('/pending', auth, adminAuth, async (req, res) => {
   try {
-    const { id } = req.params;
-    const { status, adminComment } = req.body;
+    const leaves = await LeaveRequest.find({ status: 'pending' })
+      .populate('employeeId', 'name email employeeId department')
+      .sort({ createdAt: -1 });
+    res.json(leaves);
+  } catch (error) {
+    console.error('❌ Error fetching pending leaves:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
-    console.log(`📝 Updating request ${id} to ${status}`);
+// Approve or reject a leave request (admin only)
+router.patch('/review/:id', auth, adminAuth, async (req, res) => {
+  try {
+    const { status, comment } = req.body;
 
-    if (!['approved', 'rejected'].includes(status)) {
-      return res.status(400).json({ error: 'Invalid status. Must be "approved" or "rejected"' });
+    if (!status || !['approved', 'rejected'].includes(status)) {
+      return res.status(400).json({ error: 'Status must be "approved" or "rejected"' });
     }
 
-    const request = await LeaveRequest.findById(id);
-    if (!request) {
-      return res.status(404).json({ error: 'Request not found' });
+    const leave = await LeaveRequest.findById(req.params.id);
+    if (!leave) {
+      return res.status(404).json({ error: 'Leave request not found' });
     }
 
-    if (request.status !== 'pending') {
-      return res.status(400).json({ 
-        error: `Request already processed. Current status: ${request.status}` 
-      });
+    if (leave.status !== 'pending') {
+      return res.status(400).json({ error: `This leave has already been ${leave.status}` });
     }
 
-    // Update request
-    request.status = status;
-    request.adminComment = adminComment || '';
-    await request.save();
+    leave.status = status;
+    leave.adminComment = comment || '';
+    leave.updatedAt = Date.now();
 
-    // Update leave balance if approved
-    if (status === 'approved') {
-      const user = await User.findById(request.employeeId);
+    // If rejected, restore balance
+    if (status === 'rejected') {
+      const user = await User.findById(leave.employeeId);
       if (user) {
-        user.leaveBalance -= request.daysRequested;
+        user.leaveBalance += leave.daysRequested;
         await user.save();
-        console.log(`✅ Leave balance updated for ${user.email}: ${user.leaveBalance} days remaining`);
       }
     }
 
-    await request.populate('employeeId', 'name email employeeId');
-    
-    console.log(`✅ Request ${id} ${status} successfully`);
-    res.json(request);
+    await leave.save();
+    await leave.populate('employeeId', 'name email employeeId department');
+
+    console.log(`✅ Leave ${leave._id} ${status} by admin`);
+    res.json({ message: `Leave request ${status}`, leave });
   } catch (error) {
-    console.error('❌ Error updating request:', error);
+    console.error('❌ Error reviewing leave:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Get all employees (Admin only)
+// Get all employees (admin only)
 router.get('/employees', auth, adminAuth, async (req, res) => {
   try {
     const employees = await User.find({ role: 'employee' })
       .select('-password')
-      .sort({ name: 1 });
+      .sort({ createdAt: -1 });
     res.json(employees);
   } catch (error) {
     console.error('❌ Error fetching employees:', error);
@@ -85,47 +86,21 @@ router.get('/employees', auth, adminAuth, async (req, res) => {
   }
 });
 
-// Update employee leave balance (Admin only)
-router.put('/employees/:id/balance', auth, adminAuth, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { leaveBalance } = req.body;
-
-    if (leaveBalance === undefined || leaveBalance < 0) {
-      return res.status(400).json({ error: 'Invalid leave balance value' });
-    }
-
-    const user = await User.findById(id);
-    if (!user) {
-      return res.status(404).json({ error: 'Employee not found' });
-    }
-
-    user.leaveBalance = leaveBalance;
-    await user.save();
-
-    res.json({ message: 'Leave balance updated', balance: user.leaveBalance });
-  } catch (error) {
-    console.error('❌ Error updating balance:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Get statistics (Admin only)
+// Get admin dashboard stats
 router.get('/stats', auth, adminAuth, async (req, res) => {
   try {
     const totalEmployees = await User.countDocuments({ role: 'employee' });
-    const pendingRequests = await LeaveRequest.countDocuments({ status: 'pending' });
-    const approvedToday = await LeaveRequest.countDocuments({
-      status: 'approved',
-      createdAt: { $gte: new Date(new Date().setHours(0, 0, 0, 0)) }
-    });
     const totalRequests = await LeaveRequest.countDocuments();
+    const pendingRequests = await LeaveRequest.countDocuments({ status: 'pending' });
+    const approvedRequests = await LeaveRequest.countDocuments({ status: 'approved' });
+    const rejectedRequests = await LeaveRequest.countDocuments({ status: 'rejected' });
 
     res.json({
       totalEmployees,
+      totalRequests,
       pendingRequests,
-      approvedToday,
-      totalRequests
+      approvedRequests,
+      rejectedRequests
     });
   } catch (error) {
     console.error('❌ Error fetching stats:', error);
